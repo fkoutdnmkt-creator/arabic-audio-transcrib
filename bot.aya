@@ -1,0 +1,90 @@
+
+import os
+import tempfile
+from pathlib import Path
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+from faster_whisper import WhisperModel
+
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+
+model = WhisperModel(
+    "small",
+    device="cpu",
+    compute_type="int8",
+)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "أهلًا بك 🌿\n"
+        "أرسل ملفًا صوتيًا لتفريغه إلى نص عربي."
+    )
+
+
+async def transcribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    media = message.audio or message.voice
+
+    if not media:
+        await message.reply_text("أرسل ملفًا صوتيًا من فضلك.")
+        return
+
+    if media.file_size and media.file_size > 20 * 1024 * 1024:
+        await message.reply_text(
+            "الملف أكبر من الحد المتاح للتنزيل عبر البوت."
+        )
+        return
+
+    status = await message.reply_text("جارٍ تفريغ الصوت، انتظر من فضلك...")
+
+    with tempfile.TemporaryDirectory() as folder:
+        audio_path = Path(folder) / "audio"
+        text_path = Path(folder) / "transcript.txt"
+
+        tg_file = await context.bot.get_file(media.file_id)
+        await tg_file.download_to_drive(custom_path=str(audio_path))
+
+        segments, info = model.transcribe(
+            str(audio_path),
+            language="ar",
+            vad_filter=True,
+        )
+
+        transcript = "\n".join(
+            segment.text.strip() for segment in segments
+        )
+
+        if not transcript.strip():
+            await status.edit_text("لم أتمكن من استخراج نص من التسجيل.")
+            return
+
+        text_path.write_text(transcript, encoding="utf-8")
+
+        await message.reply_text(transcript[:3500])
+
+        with open(text_path, "rb") as file:
+            await message.reply_document(
+                document=file,
+                filename="transcript.txt",
+            )
+
+        await status.delete()
+
+
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(
+    MessageHandler(filters.AUDIO | filters.VOICE, transcribe)
+)
+
+print("البوت يعمل")
+app.run_polling()
+
